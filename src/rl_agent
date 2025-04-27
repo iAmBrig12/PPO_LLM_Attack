@@ -1,0 +1,189 @@
+import numpy as np
+import torch
+from stable_baselines3 import PPO
+from stable_baselines3.common.policies import ActorCriticPolicy
+import gymnasium as gym
+from typing import Callable, Dict, List, Optional, Tuple, Type, Union
+
+class CustomNetwork(torch.nn.Module):
+    """
+    Custom network for processing the LLM adversarial environment observations.
+    """
+    def __init__(self, 
+                 feature_dim: int,
+                 embedding_dim: int = 768):
+        super(CustomNetwork, self).__init__()
+        
+        # Process prompt tokens
+        self.token_embedding = torch.nn.Embedding(30000, 64)  # Assuming vocab size up to 30000
+        self.token_encoder = torch.nn.Sequential(
+            torch.nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool1d(2),
+            torch.nn.Conv1d(128, 128, kernel_size=3, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.AdaptiveAvgPool1d(1)
+        )
+        
+        # Process response embedding
+        self.response_encoder = torch.nn.Sequential(
+            torch.nn.Linear(embedding_dim, 256),
+            torch.nn.ReLU(),
+            torch.nn.Linear(256, 128),
+            torch.nn.ReLU()
+        )
+        
+        # Process label information
+        self.label_encoder = torch.nn.Sequential(
+            torch.nn.Linear(2, 16),  # 2 inputs: original_label and current_label
+            torch.nn.ReLU()
+        )
+        
+        # Combine all features
+        combined_dim = 128 + 128 + 16  # token_features + response_features + label_features
+        self.combined_encoder = torch.nn.Sequential(
+            torch.nn.Linear(combined_dim, feature_dim),
+            torch.nn.ReLU()
+        )
+        
+    def forward(self, observations):
+        # Process prompt tokens
+        prompt_tokens = observations['prompt_tokens'].long()
+        token_emb = self.token_embedding(prompt_tokens)
+        token_emb = token_emb.permute(0, 2, 1)  # [batch, embed_dim, seq_len]
+        token_features = self.token_encoder(token_emb).squeeze(-1)  # [batch, 128]
+        
+        # Process response embedding
+        response_emb = observations['response_embedding']
+        response_features = self.response_encoder(response_emb)  # [batch, 128]
+        
+        # Process labels
+        labels = torch.stack([
+            observations['original_label'].float(),
+            observations['current_label'].float()
+        ], dim=1)  # [batch, 2]
+        label_features = self.label_encoder(labels)  # [batch, 16]
+        
+        # Combine all features
+        combined = torch.cat([token_features, response_features, label_features], dim=1)
+        features = self.combined_encoder(combined)
+        
+        return features
+
+class CustomActorCriticPolicy(ActorCriticPolicy):
+    """
+    Custom policy for the LLM adversarial task.
+    """
+    def __init__(self, *args, **kwargs):
+        super(CustomActorCriticPolicy, self).__init__(
+            *args,
+            **kwargs,
+            features_extractor_class=None,  # We'll use our own feature extractor
+            features_extractor_kwargs={}
+        )
+    
+    def _build_mlp_extractor(self) -> None:
+        """
+        Create the policy and value networks.
+        """
+        # Replace the features extractor with our custom network
+        feature_dim = 256
+        self.features_extractor = CustomNetwork(
+            feature_dim=feature_dim,
+            embedding_dim=768
+        )
+        
+        # Policy network (actor)
+        policy_net_layers = []
+        current_dim = feature_dim
+        
+        for layer_dim in self.net_arch["pi"]:
+            policy_net_layers.append(torch.nn.Linear(current_dim, layer_dim))
+            policy_net_layers.append(torch.nn.Tanh())
+            current_dim = layer_dim
+        
+        self.policy_net = torch.nn.Sequential(*policy_net_layers)
+        
+        # Value network (critic)
+        value_net_layers = []
+        current_dim = feature_dim
+        
+        for layer_dim in self.net_arch["vf"]:
+            value_net_layers.append(torch.nn.Linear(current_dim, layer_dim))
+            value_net_layers.append(torch.nn.Tanh())
+            current_dim = layer_dim
+        
+        self.value_net = torch.nn.Sequential(*value_net_layers)
+    
+    def forward(self, obs, deterministic=False):
+        """
+        Forward pass in all the networks.
+        """
+        features = self.features_extractor(obs)
+        
+        # Actor head
+        pi_latent = self.policy_net(features)
+        
+        # Separate action heads for operation, position, and token_id
+        operation_dist = self.action_dist.proba_distribution(
+            action_logits=self.action_net["operation"](pi_latent)
+        )
+        position_dist = self.action_dist.proba_distribution(
+            action_logits=self.action_net["position"](pi_latent)
+        )
+        token_id_dist = self.action_dist.proba_distribution(
+            action_logits=self.action_net["token_id"](pi_latent)
+        )
+        
+        # Sample actions
+        operations = operation_dist.get_actions(deterministic=deterministic)
+        positions = position_dist.get_actions(deterministic=deterministic)
+        token_ids = token_id_dist.get_actions(deterministic=deterministic)
+        
+        actions = {
+            'operation': operations,
+            'position': positions,
+            'token_id': token_ids
+        }
+        
+        # Value head
+        values = self.value_net(features)
+        
+        return actions, values, None
+
+def train_adversarial_agent(env, total_timesteps=10000, learning_rate=0.0003, n_steps=2048):
+    """
+    Train the adversarial RL agent.
+    
+    Args:
+        env: The LLM adversarial environment
+        total_timesteps: Total number of timesteps to train
+        learning_rate: Learning rate for the optimizer
+        n_steps: Number of steps to run for each environment per update
+        
+    Returns:
+        The trained PPO agent
+    """
+    policy_kwargs = {
+        "net_arch": {
+            "pi": [256, 256],
+            "vf": [256, 256]
+        }
+    }
+    
+    agent = PPO(
+        CustomActorCriticPolicy,
+        env,
+        learning_rate=learning_rate,
+        n_steps=n_steps,
+        batch_size=64,
+        n_epochs=10,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        policy_kwargs=policy_kwargs,
+        verbose=1
+    )
+    
+    agent.learn(total_timesteps=total_timesteps)
+    return agent

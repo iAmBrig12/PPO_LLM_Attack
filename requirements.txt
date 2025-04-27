@@ -1,0 +1,30 @@
+# Core dependencies
+numpy>=1.20.0
+pandas>=1.3.0
+matplotlib>=3.4.0
+torch>=1.10.0
+transformers>=4.18.0
+datasets>=2.0.0
+
+# Reinforcement learning libraries
+gymnasium>=0.28.1  # The new OpenAI Gym
+stable-baselines3>=1.6.0
+
+# NLP tools
+nltk>=3.6.0
+spacy>=3.2.0
+
+# Evaluation and metrics
+scikit-learn>=1.0.0
+scipy>=1.7.0
+seaborn>=0.11.0
+
+# Progress tracking and logging
+tqdm>=4.62.0
+tensorboard>=2.8.0
+wandb>=0.12.0  # Optional, for experiment tracking
+
+# Utilities
+jsonlines>=2.0.0
+pyyaml>=6.0
+huggingface_hub>=0.4.0
