@@ -7,44 +7,11 @@ from tqdm import tqdm
 from datasets import load_dataset
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
+from rl_agent import CustomNetwork
 
-# Import our custom environment
-from llm_adversarial_env import LLMAdversarialEnv
-
-def load_real_examples(dataset_name, task, split="test", num_examples=100):
-    """Load real examples from datasets."""
-    if dataset_name == "sst2":
-        dataset = load_dataset("glue", "sst2", split=split)
-        # Select num_examples random samples
-        indices = np.random.choice(len(dataset), min(num_examples, len(dataset)), replace=False)
-        examples = []
-        for i in indices:
-            examples.append({
-                "text": dataset[i]["sentence"],
-                "label": dataset[i]["label"]
-            })
-    elif dataset_name == "imdb":
-        dataset = load_dataset("imdb", split=split)
-        indices = np.random.choice(len(dataset), min(num_examples, len(dataset)), replace=False)
-        examples = []
-        for i in indices:
-            examples.append({
-                "text": dataset[i]["text"],
-                "label": dataset[i]["label"]
-            })
-    elif dataset_name == "mrpc":
-        dataset = load_dataset("glue", "mrpc", split=split)
-        indices = np.random.choice(len(dataset), min(num_examples, len(dataset)), replace=False)
-        examples = []
-        for i in indices:
-            examples.append({
-                "text": dataset[i]["sentence1"] + " [SEP] " + dataset[i]["sentence2"],
-                "label": dataset[i]["label"]
-            })
-    else:
-        raise ValueError(f"Unsupported dataset: {dataset_name}")
-    
-    return examples
+# Import our custom environment and policy
+from rl_env import LLMAdversarialEnv
+from rl_agent import CustomActorCriticPolicy
 
 def evaluate_attack(env, agent=None, num_examples=50):
     """Evaluate attack effectiveness."""
@@ -150,23 +117,34 @@ def main():
     if args.train:
         logger.info("Training adversarial agent...")
         
-        # Set up checkpointing
         checkpoint_callback = CheckpointCallback(
             save_freq=1000,
             save_path=os.path.join(args.output_dir, "checkpoints"),
             name_prefix="adversarial_agent"
         )
         
-        # Create and train the agent
         agent = PPO(
-            "MultiInputPolicy", 
+            CustomActorCriticPolicy,
             env,
             verbose=1,
             learning_rate=3e-4,
             n_steps=2048,
             batch_size=64,
             n_epochs=10,
-            gamma=0.99
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            policy_kwargs = {
+                "features_extractor_class": CustomNetwork,
+                "features_extractor_kwargs": {
+                    "feature_dim": 256,
+                    "embedding_dim": 768
+                },
+                "net_arch": {
+                    "pi": [256, 256],
+                    "vf": [256, 256]
+                }
+            }
         )
         
         agent.learn(
@@ -174,7 +152,6 @@ def main():
             callback=checkpoint_callback
         )
         
-        # Save the final model
         agent_path = os.path.join(args.output_dir, "final_model")
         agent.save(agent_path)
         logger.info(f"Agent saved to {agent_path}")
@@ -183,18 +160,26 @@ def main():
     if args.evaluate:
         logger.info("Evaluating attack effectiveness...")
         
+        if agent is None:
+            # Try loading trained agent
+            agent_path = os.path.join(args.output_dir, "final_model.zip")
+            if os.path.exists(agent_path):
+                logger.info(f"Loading agent from {agent_path}")
+                agent = PPO.load(agent_path, env=env)
+            else:
+                logger.warning("No trained agent found, using random baseline only.")
+        
         # Evaluate random baseline
         logger.info("Evaluating random baseline...")
         random_results = evaluate_attack(env, agent=None, num_examples=50)
         logger.info(f"Random baseline success rate: {random_results['success_rate']:.2f}")
         
-        # Evaluate trained agent if available
+        # Evaluate trained agent
         if agent is not None:
             logger.info("Evaluating trained agent...")
             agent_results = evaluate_attack(env, agent=agent, num_examples=50)
             logger.info(f"Agent success rate: {agent_results['success_rate']:.2f}")
             
-            # Save examples of successful attacks
             import json
             with open(os.path.join(args.output_dir, "successful_attacks.json"), "w") as f:
                 json.dump(agent_results["examples"], f, indent=2)

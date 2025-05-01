@@ -5,6 +5,8 @@ from tqdm import tqdm
 from collections import defaultdict
 import time
 import datasets
+from rl_env import LLMAdversarialEnv
+from rl_agent import CustomActorCriticPolicy
 
 class AdversarialAttackEvaluator:
     """

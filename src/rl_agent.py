@@ -5,6 +5,20 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 import gymnasium as gym
 from typing import Callable, Dict, List, Optional, Tuple, Type, Union
 
+class DummyExtractor(torch.nn.Module):
+    """
+    Dummy MLP extractor for PPO that simply passes features along
+    but defines latent_dim_pi and latent_dim_vf attributes.
+    """
+    def __init__(self, feature_dim=256):
+        super().__init__()
+        self.latent_dim_pi = feature_dim
+        self.latent_dim_vf = feature_dim
+
+    def forward(self, features):
+        return features, features
+
+
 class CustomNetwork(torch.nn.Module):
     """
     Custom network for processing the LLM adversarial environment observations.
@@ -75,81 +89,72 @@ class CustomActorCriticPolicy(ActorCriticPolicy):
     Custom policy for the LLM adversarial task.
     """
     def __init__(self, *args, **kwargs):
-        super(CustomActorCriticPolicy, self).__init__(
-            *args,
-            **kwargs,
-            features_extractor_class=None,  # We'll use our own feature extractor
-            features_extractor_kwargs={}
-        )
+        super().__init__(*args, **kwargs)
     
     def _build_mlp_extractor(self) -> None:
-        """
-        Create the policy and value networks.
-        """
-        # Replace the features extractor with our custom network
         feature_dim = 256
-        self.features_extractor = CustomNetwork(
-            feature_dim=feature_dim,
-            embedding_dim=768
-        )
-        
-        # Policy network (actor)
+
+        self.mlp_extractor = DummyExtractor(feature_dim=feature_dim)
+
+        # Policy network
         policy_net_layers = []
         current_dim = feature_dim
-        
+
         for layer_dim in self.net_arch["pi"]:
             policy_net_layers.append(torch.nn.Linear(current_dim, layer_dim))
             policy_net_layers.append(torch.nn.Tanh())
             current_dim = layer_dim
-        
+
         self.policy_net = torch.nn.Sequential(*policy_net_layers)
-        
-        # Value network (critic)
+
+        # Value network
         value_net_layers = []
         current_dim = feature_dim
-        
+
         for layer_dim in self.net_arch["vf"]:
             value_net_layers.append(torch.nn.Linear(current_dim, layer_dim))
             value_net_layers.append(torch.nn.Tanh())
             current_dim = layer_dim
-        
+
         self.value_net = torch.nn.Sequential(*value_net_layers)
-    
+
+        # Custom multi-head action outputs
+        self.custom_action_net = torch.nn.ModuleDict({
+            "operation": torch.nn.Linear(current_dim, 4),
+            "position": torch.nn.Linear(current_dim, 50),
+            "token_id": torch.nn.Linear(current_dim, 30522)
+        })
+
+
+
     def forward(self, obs, deterministic=False):
-        """
-        Forward pass in all the networks.
-        """
         features = self.features_extractor(obs)
-        
+
         # Actor head
         pi_latent = self.policy_net(features)
-        
-        # Separate action heads for operation, position, and token_id
-        operation_dist = self.action_dist.proba_distribution(
-            action_logits=self.action_net["operation"](pi_latent)
-        )
-        position_dist = self.action_dist.proba_distribution(
-            action_logits=self.action_net["position"](pi_latent)
-        )
-        token_id_dist = self.action_dist.proba_distribution(
-            action_logits=self.action_net["token_id"](pi_latent)
-        )
-        
-        # Sample actions
-        operations = operation_dist.get_actions(deterministic=deterministic)
-        positions = position_dist.get_actions(deterministic=deterministic)
-        token_ids = token_id_dist.get_actions(deterministic=deterministic)
-        
-        actions = {
-            'operation': operations,
-            'position': positions,
-            'token_id': token_ids
-        }
-        
+
+        # Compute logits separately
+        operation_logits = self.custom_action_net["operation"](pi_latent)
+        position_logits = self.custom_action_net["position"](pi_latent)
+        token_id_logits = self.custom_action_net["token_id"](pi_latent)
+
+        # 🔥 Concatenate all logits together along dim=1
+        all_logits = torch.cat([operation_logits, position_logits, token_id_logits], dim=1)
+
+        # Stable-Baselines3 expects a single big tensor
+        distribution = self.action_dist.proba_distribution(action_logits=all_logits)
+
+        # Sample action
+        actions = distribution.get_actions(deterministic=deterministic)
+
         # Value head
         values = self.value_net(features)
-        
-        return actions, values, None
+
+        # Now compute log_probs for sampled actions
+        log_probs = distribution.log_prob(actions)
+
+        return actions, values, log_probs
+
 
 def train_adversarial_agent(env, total_timesteps=10000, learning_rate=0.0003, n_steps=2048):
     """
