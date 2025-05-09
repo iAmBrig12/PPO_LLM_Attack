@@ -1,5 +1,3 @@
-# evaluate.py
-
 import argparse
 import os
 import json
@@ -8,17 +6,14 @@ import numpy as np
 import torch
 from stable_baselines3 import PPO
 from datasets import load_dataset
-
-# Assuming llm_interface.py and adversarial_env.py are in the same directory or accessible
-# Also assumes adversarial_env.py has the modified reset method accepting `initial_sample`
 from llm_interface import LLMInterface
 from adversarial_env import AdversarialEnv
 
-# --- Define Dataset Label Mappings (Should match train.py) ---
+# --- Define Dataset Label Mappings ---
 DATASET_LABEL_MAPS = {
-    "imdb": {0: "NEGATIVE", 1: "POSITIVE"},
     "sst2": {0: "NEGATIVE", 1: "POSITIVE"},
-    # Add other datasets used during training here
+    "mrpc": {0: "not_equivalent", 1: "equivalent"},
+    "mnli": {0: "entailment", 1: "neutral", 2: "contradiction"}
 }
 
 def get_dataset_mapping(dataset_name):
@@ -59,7 +54,6 @@ def evaluate_agent(args):
          dataset_label_mapping = llm_interface.id2label
 
     # --- Ensure LLM Interface uses the correct mapping for consistency ---
-    # (This ensures the environment gets the right ID when it looks up the label name)
     if llm_interface.id2label != dataset_label_mapping:
          print(f"Overriding LLM config labels ({llm_interface.id2label}) to match dataset mapping ({dataset_label_mapping}) for environment consistency.")
          label2id = {v: k for k, v in dataset_label_mapping.items()}
@@ -71,29 +65,75 @@ def evaluate_agent(args):
     # 2. Load Dataset
     print(f"Loading Dataset: {args.dataset_name}, Split: {args.dataset_split}")
     try:
-        # Load the full split first, then select the number of samples
-        full_raw_dataset = load_dataset(args.dataset_name, split=args.dataset_split)
+        # --- START: Handle GLUE datasets ---
+        glue_datasets = ["mrpc", "sst2", "mnli", "qqp", "qnli", "rte", "wnli", "cola"] # Add GLUE task names here
+        dataset_name_lower = args.dataset_name.lower()
+
+        if dataset_name_lower in glue_datasets:
+            print(f"Recognized GLUE task: {dataset_name_lower}. Loading from 'glue' collection.")
+            full_raw_dataset = load_dataset("glue", dataset_name_lower, split=args.dataset_split)
+            # --- Identify text/label columns for GLUE/MRPC ---
+            if dataset_name_lower == "mrpc":
+                 text_col = ('sentence1', 'sentence2')
+            elif args.dataset_name.lower() == "mnli":
+                text_col = ('premise', 'hypothesis')
+            elif dataset_name_lower == "sst2":
+                 text_col = 'sentence'
+            else:
+                 raise ValueError(f"Text column identification not implemented for GLUE task: {args.dataset_name}")
+            label_col = "label"
+        else:
+            print(f"Loading dataset '{args.dataset_name}' directly.")
+            full_raw_dataset = load_dataset(args.dataset_name, split=args.dataset_split)
+            text_col = "text" if "text" in full_raw_dataset.column_names else "sentence"
+            label_col = "label"
+
+        # Select number of samples AFTER loading
         if args.num_samples > 0 and args.num_samples < len(full_raw_dataset):
              raw_dataset = full_raw_dataset.select(range(args.num_samples))
              print(f"Selected first {args.num_samples} samples for evaluation.")
         else:
              raw_dataset = full_raw_dataset
              print(f"Using all {len(raw_dataset)} samples from the split.")
+
+    except ValueError as e: # Catch specific ValueError from task identification
+        print(f"Configuration Error: {e}")
+        return
     except Exception as e:
         print(f"Error loading dataset '{args.dataset_name}' split '{args.dataset_split}': {e}")
         return
 
+
     # Preprocess dataset
-    text_col = "text" if "text" in raw_dataset.column_names else "sentence"
-    label_col = "label"
-    if text_col not in raw_dataset.column_names or label_col not in raw_dataset.column_names:
-         print(f"Error: Dataset must contain '{text_col}' and '{label_col}' columns. Found: {raw_dataset.column_names}")
+    # --- START: Handle single text vs. text pair ---
+    if isinstance(text_col, tuple):
+         if len(text_col) != 2 or any(col not in raw_dataset.column_names for col in text_col):
+             print(f"Error: Expected text columns {text_col} not found in dataset {args.dataset_name}.")
+             return
+         print(f"Using text columns: {text_col}")
+         sep_token = llm_interface.tokenizer.sep_token if llm_interface.tokenizer.sep_token else "[SEP]"
+         get_text_func = lambda item: f"{item[text_col[0]]} {sep_token} {item[text_col[1]]}"
+    else:
+         if text_col not in raw_dataset.column_names:
+             print(f"Error: Expected text column '{text_col}' not found in dataset {args.dataset_name}.")
+             return
+         print(f"Using text column: '{text_col}'")
+         get_text_func = lambda item: item[text_col]
+
+    if label_col not in raw_dataset.column_names:
+         print(f"Error: Expected label column '{label_col}' not found.")
          return
+
+    dataset_label_mapping = get_dataset_mapping(args.dataset_name)
+    if not dataset_label_mapping:
+        print(f"Warning: Using LLM's default label mapping for {args.dataset_name}.")
+        dataset_label_mapping = llm_interface.id2label # Fallback
 
     id2name_func = lambda x: dataset_label_mapping.get(x, f"UNKNOWN_LABEL_{x}")
 
+
     try:
-        processed_test_dataset = [{"text": item[text_col], "label": id2name_func(item[label_col])} for item in raw_dataset]
+        processed_test_dataset = [{"text": get_text_func(item), "label": id2name_func(item[label_col])} for item in raw_dataset]
         print(f"Processed {len(processed_test_dataset)} test samples.")
         if not processed_test_dataset:
              print("Error: No samples left after processing.")
@@ -108,7 +148,6 @@ def evaluate_agent(args):
     # 3. Load Trained Agent
     print(f"Loading trained agent from: {args.model_path}")
     try:
-        # Note: The environment is not needed for loading, but we pass device
         agent = PPO.load(args.model_path, device=args.device)
         print("Agent loaded successfully.")
     except Exception as e:
@@ -116,12 +155,8 @@ def evaluate_agent(args):
         return
 
     # 4. Instantiate Environment (using the full test dataset - reset will handle specifics)
-    # Note: The 'dataset' param here is primarily used by env.reset() for *random* sampling,
-    # which we will override in the loop using the initial_sample argument.
-    # However, it's useful to pass it so the env is aware of the potential samples.
     print("Initializing evaluation environment...")
     try:
-        # Important: Use the same max_turns the agent was trained with for fair evaluation
         env = AdversarialEnv(llm_interface=llm_interface, dataset=processed_test_dataset, max_turns=args.max_turns)
     except Exception as e:
         print(f"Error initializing AdversarialEnv: {e}")
@@ -189,9 +224,9 @@ def evaluate_agent(args):
                 results_data.append({
                     "index": i,
                     "status": "success",
-                    "original_text": original_text, # Safe to use now
-                    "adversarial_text": info.get('current_text', 'ERROR'), # Use .get
-                    "original_label_id": original_label_id, # Safe to use now
+                    "original_text": original_text, 
+                    "adversarial_text": info.get('current_text', 'ERROR'), 
+                    "original_label_id": original_label_id, 
                     "final_label_id": info.get('predicted_label_id', 'N/A'),
                     "turns": num_turns_this_sample,
                     "queries": current_sample_queries
@@ -205,9 +240,9 @@ def evaluate_agent(args):
             results_data.append({
                 "index": i,
                 "status": "failure",
-                "original_text": original_text, # Safe to use now
-                "final_text": info.get('current_text', 'ERROR') if 'info' in locals() else 'N/A', # Get last text if available
-                "original_label_id": original_label_id, # Safe to use now
+                "original_text": original_text,
+                "final_text": info.get('current_text', 'ERROR') if 'info' in locals() else 'N/A', 
+                "original_label_id": original_label_id,
                 "final_label_id": info.get('predicted_label_id', 'N/A') if 'info' in locals() else 'N/A',
                 "turns": num_turns_this_sample,
                 "queries": current_sample_queries
@@ -241,7 +276,7 @@ def evaluate_agent(args):
 
     print(f"Total evaluation time: {end_time - start_time:.2f} seconds")
 
-    # 7. Save Detailed Results (Optional)
+    # 7. Save Detailed Results
     if args.output_file:
         print(f"Saving detailed results to: {args.output_file}")
         try:

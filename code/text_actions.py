@@ -1,13 +1,9 @@
-# text_actions.py
-
 import random
 import nltk
 import os
 import time
 
 # --- Start: NLTK Data Handling Block ---
-# (Keep the robust data handling block from the previous version)
-
 _nltk_data_path = os.path.join(os.path.expanduser("~"), "nltk_data")
 os.makedirs(_nltk_data_path, exist_ok=True)
 
@@ -24,7 +20,6 @@ def ensure_nltk_data():
 
     print(f"Process {os.getpid()}: Ensuring NLTK data is available...")
     print(f"Process {os.getpid()}: NLTK search paths: {nltk.data.path}")
-    # Added 'averaged_perceptron_tagger' dependency for POS tagging in antonym replacement
     resources_needed = {
         'punkt': 'tokenizers/punkt',
         'wordnet': 'corpora/wordnet',

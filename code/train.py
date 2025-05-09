@@ -1,26 +1,17 @@
-# train.py
-
 import argparse
 from stable_baselines3 import PPO
-# Use SB3's DummyVecEnv if num_envs=1, otherwise SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from datasets import load_dataset
-import torch # Import torch
-
-# Assuming llm_interface.py and adversarial_env.py are accessible
+import torch 
 from llm_interface import LLMInterface
 from adversarial_env import AdversarialEnv
 
 # --- Define Dataset Label Mappings ---
-# Add mappings for datasets you intend to use.
-# The keys should be lowercase dataset names as used by Hugging Face 'datasets'.
-# The values should map the dataset's integer label to the desired string name.
 DATASET_LABEL_MAPS = {
-    "imdb": {0: "NEGATIVE", 1: "POSITIVE"},
     "sst2": {0: "NEGATIVE", 1: "POSITIVE"},
-    # Add other datasets here, e.g.:
-    # "ag_news": {0: "World", 1: "Sports", 2: "Business", 3: "Sci/Tech"}
+    "mrpc": {0: "not_equivalent", 1: "equivalent"},
+    "mnli": {0: "entailment", 1: "neutral", 2: "contradiction"}
 }
 
 def get_dataset_mapping(dataset_name):
@@ -29,7 +20,7 @@ def get_dataset_mapping(dataset_name):
         return DATASET_LABEL_MAPS[name_lower]
     else:
         print(f"Warning: No predefined label mapping found for dataset '{dataset_name}'. Attempting to use model's default or numerical labels.")
-        return None # Fallback
+        return None 
 
 
 def train_agent(args):
@@ -64,37 +55,82 @@ def train_agent(args):
     # 2. Load Dataset
     print(f"Loading Dataset: {args.dataset_name}, Split: {args.dataset_split}")
     try:
-        raw_dataset = load_dataset(args.dataset_name, split=args.dataset_split)
+        # --- START: Handle GLUE datasets ---
+        glue_datasets = ["mrpc", "sst2", "mnli", "qqp", "qnli", "rte", "wnli", "cola"] # List of GLUE tasks
+        if args.dataset_name.lower() in glue_datasets:
+            print(f"Recognized GLUE task: {args.dataset_name}. Loading from 'glue' collection.")
+            # Load using the GLUE collection name and the specific task name
+            raw_dataset = load_dataset("glue", args.dataset_name.lower(), split=args.dataset_split)
+            # --- Identify text/label columns for GLUE/MRPC ---
+            if args.dataset_name.lower() == "mrpc":
+                text_col = ('sentence1', 'sentence2') 
+            elif args.dataset_name.lower() == "mnli":
+                text_col = ('premise', 'hypothesis')
+            elif args.dataset_name.lower() == "sst2":
+                text_col = 'sentence'
+            else:
+                # Add logic for other GLUE tasks if needed, or raise error
+                 raise ValueError(f"Text column identification not implemented for GLUE task: {args.dataset_name}")
+            label_col = "label"
+        else:
+            # Load non-GLUE dataset directly
+            print(f"Loading dataset '{args.dataset_name}' directly.")
+            raw_dataset = load_dataset(args.dataset_name, split=args.dataset_split)
+            # Standard text/label column guessing for non-GLUE
+            text_col = "text" if "text" in raw_dataset.column_names else "sentence"
+            label_col = "label"
+        # --- END: Handle GLUE datasets ---
+
     except Exception as e:
         print(f"Error loading dataset '{args.dataset_name}'. Make sure it exists and you have access.")
+        print(f"If it's a GLUE task (like mrpc, sst2), ensure it's listed in glue_datasets.")
         raise e
 
-    # Preprocess dataset to match environment expectations ({'text': ..., 'label': 'LABEL_NAME'})
-    # Determine text and label columns (common variations)
-    text_col = "text" if "text" in raw_dataset.column_names else "sentence"
-    label_col = "label"
-    if text_col not in raw_dataset.column_names or label_col not in raw_dataset.column_names:
-         raise ValueError(f"Dataset must contain '{text_col}' and '{label_col}' columns. Found: {raw_dataset.column_names}")
+    # Preprocess dataset
+    # --- START: Handle single text vs. text pair ---
+    if isinstance(text_col, tuple): # Handle pairs 
+         if len(text_col) != 2 or any(col not in raw_dataset.column_names for col in text_col):
+             raise ValueError(f"Expected text columns {text_col} not found in dataset {args.dataset_name}. Found: {raw_dataset.column_names}")
+         print(f"Using text columns: {text_col}")
+         # Combine the pair for the environment (or adapt env to handle pairs)
+         # Simple combination using SEP token might work for BERT-like models
+         sep_token = llm_interface.tokenizer.sep_token if llm_interface.tokenizer.sep_token else "[SEP]"
+         get_text_func = lambda item: f"{item[text_col[0]]} {sep_token} {item[text_col[1]]}"
+    else: # Handle single text column
+         if text_col not in raw_dataset.column_names:
+             raise ValueError(f"Expected text column '{text_col}' not found in dataset {args.dataset_name}. Found: {raw_dataset.column_names}")
+         print(f"Using text column: '{text_col}'")
+         get_text_func = lambda item: item[text_col]
+    # --- END: Handle single text vs. text pair ---
 
-    # Use the specific mapping if available, otherwise fallback
-    if dataset_label_mapping:
-        print(f"Using label mapping: {dataset_label_mapping}")
-        id2name_func = lambda x: dataset_label_mapping.get(x, f"UNKNOWN_LABEL_{x}") # Convert ID to name
-    else:
-         # Fallback: try using the LLM's possibly overridden mapping, or just use the raw label ID as string
-         print("Warning: Using fallback label name conversion.")
+    if label_col not in raw_dataset.column_names:
+        raise ValueError(f"Expected label column '{label_col}' not found in dataset {args.dataset_name}. Found: {raw_dataset.column_names}")
+
+    # Get label mapping (should already be defined in DATASET_LABEL_MAPS)
+    dataset_label_mapping = get_dataset_mapping(args.dataset_name)
+    if not dataset_label_mapping:
+         # Fallback needed if map isn't predefined (though it should be for GLUE tasks)
+         print(f"Warning: Using fallback label name conversion for {args.dataset_name}.")
          id2name_func = lambda x: llm_interface.id2label.get(x, str(x))
-
+    else:
+        print(f"Using label mapping: {dataset_label_mapping}")
+        id2name_func = lambda x: dataset_label_mapping.get(x, f"UNKNOWN_LABEL_{x}")
 
     try:
-        processed_dataset = [{"text": item[text_col], "label": id2name_func(item[label_col])} for item in raw_dataset]
+        # Apply text extraction and label mapping
+        processed_dataset = [{"text": get_text_func(item), "label": id2name_func(item[label_col])} for item in raw_dataset]
         print(f"Processed {len(processed_dataset)} samples. Example: {processed_dataset[0] if processed_dataset else 'N/A'}")
         if not processed_dataset:
              raise ValueError("Dataset processing resulted in zero samples.")
     except Exception as e:
-        print(f"Error processing dataset. Check if '{label_col}' values are valid keys in the mapping: {dataset_label_mapping or llm_interface.id2label}")
+        print(f"Error processing dataset. Check labels and mapping.")
         print(f"Original error: {e}")
         raise e
+
+    # --- Update DATASET_LABEL_MAPS if needed ---
+    # Make sure MRPC mapping exists
+    if "mrpc" not in DATASET_LABEL_MAPS:
+         DATASET_LABEL_MAPS["mrpc"] = {0: "not_equivalent", 1: "equivalent"} # Standard MRPC labels
 
 
     # 3. Create Vectorized Environment
@@ -146,24 +182,23 @@ def train_agent(args):
     print("--- Training Finished ---")
 
 
-# --- Argparse Block (No changes needed here, ensure imports match) ---
 if __name__ == "__main__":
-    import os # Make sure os is imported
+    import os 
     parser = argparse.ArgumentParser(description="Train an RL agent for adversarial attacks on LLMs.")
 
     # Environment Args
     parser.add_argument("--model_name", type=str, default="textattack/bert-base-uncased-imdb", help="Hugging Face model identifier for the target LLM.")
     parser.add_argument("--dataset_name", type=str, default="imdb", help="Hugging Face dataset name (e.g., 'sst2', 'imdb').")
     parser.add_argument("--dataset_split", type=str, default="train[:5%]", help="Dataset split to use (e.g., 'train', 'validation', 'train[:1000]', 'train[:5%]'). Use small subsets for faster testing.")
-    parser.add_argument("--max_turns", type=int, default=15, help="Maximum modifications per episode.") # Default reduced slightly
+    parser.add_argument("--max_turns", type=int, default=15, help="Maximum modifications per episode.") 
 
     # Training Args
     parser.add_argument("--num_envs", type=int, default=4, help="Number of parallel environments.")
-    parser.add_argument("--total_timesteps", type=int, default=200_000, help="Total training timesteps.") # Increased default
+    parser.add_argument("--total_timesteps", type=int, default=200_000, help="Total training timesteps.") 
     parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate for PPO.")
     parser.add_argument("--n_steps", type=int, default=2048, help="Number of steps to run for each environment per update.")
     parser.add_argument("--batch_size", type=int, default=64, help="Minibatch size for PPO.")
-    parser.add_argument("--n_epochs", type=int, default=10, help="Number of optimization epochs per update.") # Default back to 10
+    parser.add_argument("--n_epochs", type=int, default=10, help="Number of optimization epochs per update.")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
     parser.add_argument("--gae_lambda", type=float, default=0.95, help="Factor for trade-off Generalized Advantage Estimation.")
     parser.add_argument("--clip_range", type=float, default=0.2, help="Clipping parameter for PPO.")
@@ -180,5 +215,4 @@ if __name__ == "__main__":
     os.makedirs(args.log_dir, exist_ok=True)
     os.makedirs(args.save_dir, exist_ok=True)
 
-    # Note: Device selection moved inside train_agent for clarity
     train_agent(args)
