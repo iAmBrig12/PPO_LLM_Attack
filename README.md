@@ -1,129 +1,91 @@
-sst2
-textattack/bert-base-uncased-SST-2  
-textattack/roberta-base-SST-2
-textattack/distilbert-base-uncased-SST-2
+# Adversarial Attacks on LLMs with Reinforcement Learning
 
-mrpc
-textattack/bert-base-uncased-MRPC
-textattack/roberta-base-MRPC
-textattack/distilbert-base-uncased-MRPC
+This project explores the use of reinforcement learning (RL) to generate adversarial attacks on large language models (LLMs). The goal is to train an RL agent to modify input text in a way that causes the target LLM to misclassify it, while adhering to constraints such as semantic similarity and limited modifications.
 
-mnli 
-textattack/bert-base-uncased-MNLI
-textattack/roberta-base-MNLI
-typeform/distilbert-base-uncased-mnli
+## Project Structure
 
+### Directory Overview
+- **`src/`**: Contains the source code for the project.
+  - **`train.py`**: Script to train the RL agent using the PPO algorithm.
+  - **`evaluate.py`**: Script to evaluate the trained RL agent on a test dataset.
+  - **`llm_interface.py`**: Interface for interacting with Hugging Face LLMs for classification tasks.
+  - **`text_actions.py`**: Defines discrete text modification actions for adversarial attacks.
+  - **`adversarial_env.py`**: Custom Gymnasium environment for adversarial attack simulation.
+- **`.gitignore`**: Specifies files and directories to ignore in version control.
+- **`.gitattributes`**: Configures Git's handling of text files.
+- **`requirements.txt`**: Lists the Python dependencies required for the project.
 
-sst2
------------------------------------------------
-python code/train.py --model_name "textattack/bert-base-uncased-SST-2" --dataset_name "sst2" --dataset_split "train[:100%]" --total_timesteps 200000 --max_turns 10 --num_envs 4 
-Total samples in split: 100
-Samples skipped (initial misclassification/error): 8
-Samples evaluated: 92
-Attack Success Rate (ASR): 35.87% (33/92)
-Average Queries per Successful Attack (AQS): 5.58
-Average Queries per Evaluated Sample (includes failures): 9.41
-Average Queries per Successful Sample (end-to-end): 6.58
-Total evaluation time: 5.32 seconds
-Saving detailed results to: ./evaluation_results/bert_test_results.json
+### Key Components
+1. **Reinforcement Learning Agent**:
+   - The RL agent is trained using the Proximal Policy Optimization (PPO) algorithm from the `stable-baselines3` library.
+   - The agent interacts with a custom environment (`AdversarialEnv`) to learn how to modify text for successful attacks.
 
-python code/train.py --model_name "textattack/roberta-base-SST-2" --dataset_name "sst2" --dataset_split "train[:100%]" --total_timesteps 200000 --max_turns 10 --num_envs 4     
---- Evaluation Results ---
-Total samples in split: 100
-Samples skipped (initial misclassification/error): 5
-Samples evaluated: 95
-Attack Success Rate (ASR): 42.11% (40/95)
-Average Queries per Successful Attack (AQS): 5.00
-Average Queries per Evaluated Sample (includes failures): 8.89
-Average Queries per Successful Sample (end-to-end): 6.00
-Total evaluation time: 5.31 seconds
-Saving detailed results to: ./evaluation_results/roberta_test_results.json
-Results saved.
---- Evaluation Finished ---
+2. **Custom Environment**:
+   - The `AdversarialEnv` simulates the adversarial attack process.
+   - It provides observations (e.g., probabilities of LLM predictions) and rewards based on the success of the attack and the quality of modifications.
 
-python code/train.py --model_name "textattack/distilbert-base-uncased-SST-2" --dataset_name "sst2" --dataset_split "train[:100%]" --total_timesteps 200000 --max_turns 10 --num_envs 4
-Total samples in split: 100
-Samples skipped (initial misclassification/error): 44
-Samples evaluated: 56
-Attack Success Rate (ASR): 37.50% (21/56)
-Average Queries per Successful Attack (AQS): 3.71
-Average Queries per Evaluated Sample (includes failures): 8.64
-Average Queries per Successful Sample (end-to-end): 4.71
-Total evaluation time: 3.19 seconds
-Saving detailed results to: ./evaluation_results/distilbert_test_results.json
+3. **Text Modification Actions**:
+   - Actions include replacing words with synonyms, deleting words, adding noise words, swapping words, and more.
+   - These actions are defined in `text_actions.py` and are designed to maintain semantic similarity while altering the text.
 
+4. **LLM Interface**:
+   - The `LLMInterface` provides a wrapper around Hugging Face models for classification tasks.
+   - It handles tokenization, model inference, and label mapping.
 
-mrpc
------------------------------------------------------------
-python code/train.py --model_name "textattack/bert-base-uncased-MRPC" --dataset_name "mrpc" --dataset_split "train[:100%]" --total_timesteps 200000 --max_turns 10 --num_envs 4
---- Evaluation Results ---
-Total samples in split: 100
-Samples skipped (initial misclassification/error): 53
-Samples evaluated: 47
-Attack Success Rate (ASR): 34.04% (16/47)
-Average Queries per Successful Attack (AQS): 4.56
-Average Queries per Evaluated Sample (includes failures): 9.15
-Average Queries per Successful Sample (end-to-end): 5.56
-Total evaluation time: 3.76 seconds
-Saving detailed results to: ./evaluation_results/bert_mrpc_test_results.json
-Results saved.
---- Evaluation Finished ---
+5. **Dataset Handling**:
+   - The project uses datasets from the Hugging Face `datasets` library, including GLUE tasks like SST-2, MRPC, and MNLI.
+   - Preprocessing ensures compatibility with the LLM and RL environment.
 
-PS D:\GitHub Repos\CS6375_Project> python code/train.py --model_name "textattack/roberta-base-MRPC" --dataset_name "mrpc" --dataset_split "train[:100%]" --total_timesteps 200000 --max_turns 10 --num_envs 4    
-Total samples in split: 100
-Samples skipped (initial misclassification/error): 8
-Samples evaluated: 92
-Attack Success Rate (ASR): 33.70% (31/92)
-Average Queries per Successful Attack (AQS): 5.58
-Average Queries per Evaluated Sample (includes failures): 9.51
-Average Queries per Successful Sample (end-to-end): 6.58
-Total evaluation time: 3.86 seconds
-Saving detailed results to: ./evaluation_results/roberta_test_results.json
+## Installation
 
-python code/train.py --model_name "textattack/distilbert-base-uncased-MRPC" --dataset_name "mrpc" --dataset_split "train[:100%]" --total_timesteps 200000 --max_turns 10 --num_envs 4 
-Total samples in split: 100
-Samples skipped (initial misclassification/error): 11
-Samples evaluated: 89
-Attack Success Rate (ASR): 7.87% (7/89)
-Average Queries per Successful Attack (AQS): 4.71
-Average Queries per Evaluated Sample (includes failures): 10.58
-Average Queries per Successful Sample (end-to-end): 5.71
-Total evaluation time: 4.38 seconds
-Saving detailed results to: ./evaluation_results/distilbert_test_results.json
+To set up the project, first install the required dependencies listed in `requirements.txt`. You can do this using the following command:
 
-mnli
-----------------------------------------------------------------
-python code/train.py --model_name "textattack/bert-base-uncased-MNLI" --dataset_name "mnli" --dataset_split "train[:100%]" --total_timesteps 200000 --max_turns 10 --num_envs 4
-Total samples in split: 100
-Samples skipped (initial misclassification/error): 73
-Samples evaluated: 27
-Attack Success Rate (ASR): 48.15% (13/27)
-Average Queries per Successful Attack (AQS): 3.46
-Average Queries per Evaluated Sample (includes failures): 7.85
-Average Queries per Successful Sample (end-to-end): 4.46
-Total evaluation time: 3.40 seconds
-Saving detailed results to: ./evaluation_results/bert_mnli_test_results.json
-Results saved.
+```bash
+pip install -r requirements.txt
+```
 
-python code/train.py --model_name "textattack/roberta-base-MNLI" --dataset_name "mnli" --dataset_split "train[:100%]" --total_timesteps 200000 --max_turns 10 --num_envs 4
-Total samples in split: 100
-Samples skipped (initial misclassification/error): 74
-Samples evaluated: 26
-Attack Success Rate (ASR): 53.85% (14/26)
-Average Queries per Successful Attack (AQS): 3.43
-Average Queries per Evaluated Sample (includes failures): 7.46
-Average Queries per Successful Sample (end-to-end): 4.43
-Total evaluation time: 3.03 seconds
-Saving detailed results to: ./evaluation_results/roberta_mnli_test_results.json
-Results saved.
+## Running the Scripts
 
-python code/train.py --model_name "typeform/distilbert-base-uncased-mnli" --dataset_name "mnli" --dataset_split "train[:100%]" --total_timesteps 200000 --max_turns 10 --num_envs 4
-Total samples in split: 100
-Samples skipped (initial misclassification/error): 24
-Samples evaluated: 76
-Attack Success Rate (ASR): 68.42% (52/76)
-Average Queries per Successful Attack (AQS): 3.88
-Average Queries per Evaluated Sample (includes failures): 6.82
-Average Queries per Successful Sample (end-to-end): 4.88
-Total evaluation time: 3.26 seconds
-Saving detailed results to: ./evaluation_results/roberta_mnli_test_results.json
+### Training the RL Agent
+
+To train the RL agent, use the `train.py` script. Below is an example command:
+
+```bash
+python src/train.py \
+    --model_name textattack/bert-base-uncased-imdb \
+    --dataset_name imdb \
+    --dataset_split train[:5%] \
+    --max_turns 15 \
+    --num_envs 4 \
+    --total_timesteps 200000 \
+    --learning_rate 3e-4 \
+    --n_steps 2048 \
+    --batch_size 64 \
+    --n_epochs 10 \
+    --gamma 0.99 \
+    --gae_lambda 0.95 \
+    --clip_range 0.2 \
+    --seed 42 \
+    --device auto \
+    --log_dir ./tensorboard_logs/ \
+    --save_dir ./trained_models/
+```
+
+### Evaluating the RL Agent
+
+To evaluate a trained RL agent, use the `evaluate.py` script. Below is an example command:
+
+```bash
+python src/evaluate.py \
+    --model_path ./trained_models/ppo_shaped_bert-base-uncased-imdb_imdb/final_model.zip \
+    --llm_model_name textattack/bert-base-uncased-imdb \
+    --dataset_name imdb \
+    --dataset_split test[:5%] \
+    --max_turns 25 \
+    --num_samples 100 \
+    --output_file ./evaluation_results/results.json \
+    --device auto
+```
+
+The evaluation script will output metrics such as attack success rate (ASR) and average queries per sample.
+
